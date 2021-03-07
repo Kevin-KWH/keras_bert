@@ -1,4 +1,5 @@
-import token
+import math
+
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 from tensorflow.python.keras import initializers
@@ -66,8 +67,39 @@ class EmbeddingLayer(tf.keras.layers.Layer):
 
 class AttentionLayer(tf.keras.layers.Layer):
     def __init__(self,
-                
-                ):
+                hidden_size,
+                num_attention_heads=1,
+                attention_mask=None,
+                attention_prods_dropout_prob=0.0,
+                initializer_range=0.02,
+                query_act=None,
+                key_act=None,
+                value_act=None,
+                **kwargs):
+        super().__init__(**kwargs)
+        assert hidden_size % num_attention_heads == 0, "The hidden size (%d) is not a multiple of the number of \
+            attention heads (%d)" % (hidden_size, num_attention_heads)
+        self.hidden_size = hidden_size
+        self.num_attention_heads = num_attention_heads
+        self.size_per_head = int(hidden_size / num_attention_heads)
+        self.initializer_range = initializer_range
+        
+        # query_layer, key_layer and value_layer, have the same inputs: [batch_size, sequence_length, hidden_size],
+        # also have the same outputs: [batch_size, sequence_length, hidden_size]
+        self.query_layer = tf.keras.layers.Dense(hidden_size, activation=query_act, 
+                                                kernel_initializer=create_initializer(initializer_range))
+        self.key_layer = tf.keras.layers.Dense(hidden_size, activation=key_act, 
+                                                kernel_initializer=create_initializer(initializer_range))
+        self.value_layer = tf.keras.layers.Dense(hidden_size, activation=value_act,
+                                                kernel_intializer=create_initializer(initializer_range))
+        
+        # shape: [batch_size, sequence_length, sequence_length]
+        self.attention_scores = tf.matmul(self.query_layer, self.key_layer, transpose_b=True)
+        self.attention_scores = tf.multiply(self.attention_scores, 1.0 / math.sqrt(float(self.size_per_head)))
+
+        if attention_mask is not None:
+            attention_mask = 
+
 
 
 
