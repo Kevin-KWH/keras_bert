@@ -3,6 +3,7 @@ import math
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 from tensorflow.python.keras import initializers
+from tensorflow.python.keras.backend import dropout
 
 
 
@@ -69,7 +70,6 @@ class AttentionLayer(tf.keras.layers.Layer):
     def __init__(self,
                 hidden_size,
                 num_attention_heads=1,
-                attention_mask=None,
                 attention_prods_dropout_prob=0.0,
                 initializer_range=0.02,
                 query_act=None,
@@ -82,28 +82,96 @@ class AttentionLayer(tf.keras.layers.Layer):
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
         self.size_per_head = int(hidden_size / num_attention_heads)
+        self.attention_prods_dropout_prob = attention_prods_dropout_prob
         self.initializer_range = initializer_range
         
-        # query_layer, key_layer and value_layer, have the same inputs: [batch_size, sequence_length, hidden_size],
-        # also have the same outputs: [batch_size, sequence_length, hidden_size]
+        # query_layer, key_layer and value_layer, have the same inputs: [batch_size, seq_length, hidden_size],
+        # also have the same outputs: [batch_size, seq_length, hidden_size]
         self.query_layer = tf.keras.layers.Dense(hidden_size, activation=query_act, 
                                                 kernel_initializer=create_initializer(initializer_range))
         self.key_layer = tf.keras.layers.Dense(hidden_size, activation=key_act, 
                                                 kernel_initializer=create_initializer(initializer_range))
         self.value_layer = tf.keras.layers.Dense(hidden_size, activation=value_act,
                                                 kernel_intializer=create_initializer(initializer_range))
-        
-        # shape: [batch_size, sequence_length, sequence_length]
+
+        # shape: [batch_size, seq_length, seq_length]
         self.attention_scores = tf.matmul(self.query_layer, self.key_layer, transpose_b=True)
         self.attention_scores = tf.multiply(self.attention_scores, 1.0 / math.sqrt(float(self.size_per_head)))
 
+    def process_attention_mask(self, attention_mask):
+        # attention_mask = [batch_size, seq_length]
+        assert attention_mask.ndim == 2, "rank of attention mask must equal to 2, [batch_size, seq_length]"
+        batch_size = attention_mask.shape[0]
+        seq_length = attention_mask.shape[1]
+
+        # attention_mask = [batch_size, 1, seq_length]
+        attention_mask = tf.cast(tf.reshape(attention_mask, [batch_size, 1, seq_length]), tf.float32)
+        # broadcast_ones = [batch_size, seq_length, 1]
+        broadcast_ones = tf.ones(shape=[batch_size, seq_length, 1], dtype=tf.float32)
+        # attention_mask = [batch_size, seq_length, seq_length]
+        attention_mask = broadcast_ones * attention_mask
+
+        return attention_mask
+    
+    def transpose_for_scores(self, inputs, batch_size, num_attention_heads, seq_length, size_per_head):
+        # inputs = [batch_size, seq_length, hidden_size]
+        assert inputs.shape[-1] == num_attention_heads * size_per_head, "The size of last dimension of inputs (%d) must equal to \
+            num_attention_heads (%d) * size_per_head (%d)" % (inputs.shape[-1], num_attention_heads, size_per_head)
+        
+        # outputs = [batch_size, seq_length, num_attention_heads, size_per_head]
+        outputs = tf.reshape(inputs, [batch_size, seq_length, num_attention_heads, size_per_head])
+        # outputs = [batch_size, num_attention_heads, seq_length, size_per_head]
+        outputs = tf.transpose(outputs, [0, 2, 1, 3])
+        return outputs
+    
+    def call(self, inputs, attention_mask=None, is_training=True):
+        # inputs is the output of embedding layer or the output of previous attention block
+        # inputs = [batch_size, seq_length, hidden_size]
+        assert inputs.ndim == 3, "rank of input_ids must equal to 3, [batch_size, seq_length, hidden_size]"
+        batch_size = inputs.shape[0]
+        seq_length = inputs.shape[1]
+
+        # query = [batch_size, seq_length, hidden_size]
+        query = self.query_layer(inputs)
+        # key = [batch_size, seq_length, hidden_size]
+        key = self.key_layer(inputs)
+        # value = [batch_size, seq_length, hidden_size]
+        value = self.value_layer(inputs)
+
+        # query = [batch_size, num_attention_heads, seq_length, size_per_head]
+        query = self.transpose_for_scores(query, batch_size, self.num_attention_heads, seq_length, self.size_per_head)
+        # key = [batch_size, num_attention_heads, seq_length, size_per_head]
+        key = self.transpose_for_scores(key, batch_size, self.num_attention_heads, seq_length, self.size_per_head)
+
+        # attention_scores = [batch_size, num_attention_heads, seq_length, seq_length]
+        attention_scores = tf.matmul(query, key, transpose_b=True)
+        attention_scores = tf.multiply(attention_scores, 1.0 / math.sqrt(float(self.size_per_head)))
+
         if attention_mask is not None:
-            attention_mask = 
+            # attention_mask = [batch_size, seq_length, seq_length]
+            attention_mask = self.process_attention_mask(attention_mask)
+            # attention_mask = [batch_size, 1, seq_length, seq_length]
+            attention_mask = tf.expand_dims(attention_mask, axis=[1])
 
+            attention_mask = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0
+            attention_scores += attention_mask
+        
+        # attention_probs = [batch_size, num_attention_heads, seq_length, seq_length]
+        attention_probs = tf.keras.layers.Softmax()(attention_scores)
+        attention_probs = tf.keras.layers.Dropout(self.attention_prods_dropout_prob)(attention_probs, training=is_training)
 
+        # value = [batch_size, num_attention_heads, seq_length, size_per_head]
+        value = self.transpose_for_scores(value, batch_size, self.num_attention_heads, seq_length, self.size_per_head)
 
+        # outputs = [batch_size, num_attention_heads, seq_length, size_per_head]
+        outputs = tf.matmul(attention_probs, value)
+        # outputs = [batch_size, seq_length, num_attention_heads, size_per_head]
+        outputs = tf.transpose(outputs, [0, 2, 1, 3])
+        # outputs = [batch_size, seq_length, hidden_size]
+        outputs = tf.reshape(outputs, [batch_size, seq_length, self.hidden_size])
 
-
+        return outputs
+        
 
 
 
