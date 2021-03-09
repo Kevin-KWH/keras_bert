@@ -19,12 +19,14 @@ class EmbeddingLayer(tf.keras.layers.Layer):
                 type_vocab_size=2,
                 dropout_rate=0.2,
                 stddev=0.02,
+                is_training=True,
                 **kwargs):
         super().__int__(**kwargs)
         assert vocab_size > 0, "vocab_size must greater then 0."
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.stddev = stddev
+        self.is_training = is_training
 
         self.position_embedding = tf.keras.layers.Embedding(
             max_position_length,
@@ -40,7 +42,7 @@ class EmbeddingLayer(tf.keras.layers.Layer):
             name="token_type_embedding"
         )
 
-        self.layer_norm = tf.keras.layers.LayerNormalization(axis=-1, name="layer_norm")
+        self.layer_norm = tf.keras.layers.LayerNormalization(name="layer_norm")
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
 
     def build(self, input_shape):
@@ -50,7 +52,7 @@ class EmbeddingLayer(tf.keras.layers.Layer):
             initializer=create_initializer(stddev=self.stddev)
             )
     
-    def call(self, input_ids, token_type_ids, training=None):
+    def call(self, input_ids, token_type_ids):
         seq_len = tf.shape(input_ids)[-1]
         position_ids = tf.range(seq_len, dtype=tf.int32)[tf.newaxis, :]
         position_embeddings = self.position_embedding(position_ids)
@@ -61,7 +63,7 @@ class EmbeddingLayer(tf.keras.layers.Layer):
 
         embeddings = token_embeddings + token_type_embeddings + position_embeddings
         embeddings = self.layer_norm(embeddings)
-        embeddings = self.dropout(embeddings, training=training)
+        embeddings = self.dropout(embeddings, training=self.is_training)
         
         return embeddings
 
@@ -75,6 +77,7 @@ class AttentionLayer(tf.keras.layers.Layer):
                 query_act=None,
                 key_act=None,
                 value_act=None,
+                is_training=True,
                 **kwargs):
         super().__init__(**kwargs)
         assert hidden_size % num_attention_heads == 0, "The hidden size (%d) is not a multiple of the number of \
@@ -84,6 +87,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         self.size_per_head = int(hidden_size / num_attention_heads)
         self.attention_prods_dropout_prob = attention_prods_dropout_prob
         self.initializer_range = initializer_range
+        self.is_training = is_training
         
         # query_layer, key_layer and value_layer, have the same inputs: [batch_size, seq_length, hidden_size],
         # also have the same outputs: [batch_size, seq_length, hidden_size]
@@ -124,7 +128,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         outputs = tf.transpose(outputs, [0, 2, 1, 3])
         return outputs
     
-    def call(self, inputs, attention_mask=None, is_training=True):
+    def call(self, inputs, attention_mask=None):
         # inputs is the output of embedding layer or the output of previous attention block
         # inputs = [batch_size, seq_length, hidden_size]
         assert inputs.ndim == 3, "rank of input_ids must equal to 3, [batch_size, seq_length, hidden_size]"
@@ -158,7 +162,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         
         # attention_probs = [batch_size, num_attention_heads, seq_length, seq_length]
         attention_probs = tf.keras.layers.Softmax()(attention_scores)
-        attention_probs = tf.keras.layers.Dropout(self.attention_prods_dropout_prob)(attention_probs, training=is_training)
+        attention_probs = tf.keras.layers.Dropout(self.attention_prods_dropout_prob)(attention_probs, training=self.is_training)
 
         # value = [batch_size, num_attention_heads, seq_length, size_per_head]
         value = self.transpose_for_scores(value, batch_size, self.num_attention_heads, seq_length, self.size_per_head)
@@ -173,6 +177,8 @@ class AttentionLayer(tf.keras.layers.Layer):
         return outputs
         
 
+class BertModel():
+    
 
 
 
