@@ -2,13 +2,9 @@ import json
 import math
 import copy
 
+
 import tensorflow as tf
-from tensorflow.keras.layers import Layer
-from tensorflow.python.framework.ops import Tensor
-from tensorflow.python.keras import initializers
-from tensorflow.python.keras.backend import dropout
-from tensorflow.python.keras.layers.embeddings import Embedding
-from tensorflow.python.ops.gen_array_ops import unique
+from tensorflow.keras.layers import Layer, Embedding, Dense, Dropout, Softmax, LayerNormalization
 
 
 def create_initializer(stddev=0.02):
@@ -16,7 +12,6 @@ def create_initializer(stddev=0.02):
 
 def check_input_mask(input_mask):
     unique_values, _ = tf.unique(tf.reshape(input_mask, [-1]))
-    print(unique_values)
     unique_values = list(unique_values.numpy())
     unique_values.sort()
     if len(unique_values) == 1 and unique_values[0] in [0, 1]:
@@ -78,7 +73,7 @@ class BertConfig(object):
         return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
 
 
-class EmbeddingLayer(tf.keras.layers.Layer):
+class EmbeddingLayer(Layer):
     def __init__(self,
                 vocab_size=1,
                 max_position_length=512,
@@ -86,7 +81,7 @@ class EmbeddingLayer(tf.keras.layers.Layer):
                 type_vocab_size=2,
                 dropout_prob=0.2,
                 stddev=0.02,
-                name="embedding layer",
+                name="embedding_layer",
                 **kwargs):
         super(EmbeddingLayer, self).__init__()
 
@@ -95,31 +90,32 @@ class EmbeddingLayer(tf.keras.layers.Layer):
         self.embedding_size = embedding_size
         self.stddev = stddev
 
-        self.position_embedding = tf.keras.layers.Embedding(
+        self.position_embedding = Embedding(
             max_position_length,
             embedding_size,
             embeddings_initializer=create_initializer(stddev=stddev),
             name="position_embedding_layer"
         )
 
-        self.token_type_embedding = tf.keras.layers.Embedding(
+        self.token_type_embedding = Embedding(
             type_vocab_size,
             embedding_size,
             embeddings_initializer=create_initializer(stddev=stddev),
             name="token_type_embedding_layer"
         )
-
-        self.layer_norm = tf.keras.layers.LayerNormalization(name="layer_norm")
-        self.dropout = tf.keras.layers.Dropout(dropout_prob)
+        
+        self.layer_norm = LayerNormalization(name="layer_norm")
+        self.dropout = Dropout(dropout_prob)
 
     def build(self, input_shape):
         self.token_embedding = self.add_weight(
-            name="word_embedding",
+            name="token_embedding",
             shape=(self.vocab_size, self.embedding_size),
             initializer=create_initializer(stddev=self.stddev)
             )
     
     def call(self, input_ids, token_type_ids, training=None):
+        # input_ids: [b, s]; token_type_ids: [b, s]
         seq_len = tf.shape(input_ids)[-1]
         position_ids = tf.range(seq_len, dtype=tf.int32)[tf.newaxis, :]
         position_embeddings = self.position_embedding(position_ids)
@@ -135,7 +131,7 @@ class EmbeddingLayer(tf.keras.layers.Layer):
         return (embeddings, self.token_embedding)
 
 
-class AttentionLayer(tf.keras.layers.Layer):
+class AttentionLayer(Layer):
     def __init__(self,
                 hidden_size,
                 num_attention_heads=1,
@@ -144,6 +140,7 @@ class AttentionLayer(tf.keras.layers.Layer):
                 query_act=None,
                 key_act=None,
                 value_act=None,
+                name="attention_layer",
                 **kwargs):
         super(AttentionLayer, self).__init__()
 
@@ -157,12 +154,21 @@ class AttentionLayer(tf.keras.layers.Layer):
         
         # query_layer, key_layer and value_layer, have the same inputs: [batch_size, seq_length, hidden_size],
         # also have the same outputs: [batch_size, seq_length, hidden_size]
-        self.query_layer = tf.keras.layers.Dense(hidden_size, activation=query_act, 
-                                                kernel_initializer=create_initializer(initializer_range))
-        self.key_layer = tf.keras.layers.Dense(hidden_size, activation=key_act, 
-                                                kernel_initializer=create_initializer(initializer_range))
-        self.value_layer = tf.keras.layers.Dense(hidden_size, activation=value_act,
-                                                kernel_initializer=create_initializer(initializer_range))
+        self.query_layer = Dense(hidden_size, 
+                activation=query_act, 
+                kernel_initializer=create_initializer(initializer_range),
+                name="query_layer")
+        self.key_layer = Dense(hidden_size, 
+                activation=key_act, 
+                kernel_initializer=create_initializer(initializer_range),
+                name="key_layer")
+        self.value_layer = Dense(hidden_size, 
+                activation=value_act,
+                kernel_initializer=create_initializer(initializer_range),
+                name="value_layer")
+        
+        self.attn_softmax_layer = Softmax()
+        self.attn_dropout_layer = Dropout(self.attention_probs_dropout_prob)
 
     def process_attention_mask(self, attention_mask):
         # attention_mask = [batch_size, seq_length]
@@ -191,7 +197,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         return outputs
     
     def call(self, inputs, attention_mask=None, training=None):
-        # inputs is the output of embedding layer or the output of previous attention block
+        # inputs is the output of embedding layer or the output of previous encoder block
         # inputs = [batch_size, seq_length, hidden_size]
         assert inputs.ndim == 3, "rank of input_ids must equal to 3, [batch_size, seq_length, hidden_size]"
         batch_size = inputs.shape[0]
@@ -223,8 +229,8 @@ class AttentionLayer(tf.keras.layers.Layer):
             attention_scores += attention_mask
         
         # attention_probs = [batch_size, num_attention_heads, seq_length, seq_length]
-        attention_probs = tf.keras.layers.Softmax()(attention_scores)
-        attention_probs = tf.keras.layers.Dropout(self.attention_probs_dropout_prob)(attention_probs, training=training)
+        attention_probs = self.attn_softmax_layer(attention_scores)
+        attention_probs = self.attn_dropout_layer(attention_probs, training=training)
 
         # value = [batch_size, num_attention_heads, seq_length, size_per_head]
         value = self.transpose_for_scores(value, batch_size, self.num_attention_heads, seq_length, self.size_per_head)
@@ -237,7 +243,57 @@ class AttentionLayer(tf.keras.layers.Layer):
         outputs = tf.reshape(outputs, [batch_size, seq_length, self.hidden_size])
 
         return outputs
-        
+
+
+class Encoder(Layer):
+    def __init__(self,
+                 hidden_size,
+                 num_attention_heads,
+                 attention_probs_dropout_prob,
+                 hidden_dropout_prob,
+                 intermediate_size,
+                 hidden_act,
+                 initializer_range,
+                 name="encoder_layer",
+                 **kwargs):
+        super(Encoder, self).__init__(**kwargs)
+
+        self.attn_layer = AttentionLayer(hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                attention_probs_dropout_prob=attention_probs_dropout_prob,
+                initializer_range=initializer_range,
+                name="attention_layer")
+        self.attn_dense_layer = Dense(hidden_size,
+                kernel_initializer=create_initializer(initializer_range),
+                name="attention_dense_layer")
+        self.attn_dropout_layer = Dropout(attention_probs_dropout_prob,
+                name="attention_dropout_layer")
+        self.attn_layerNorm_layer = LayerNormalization(name="attention_layerNorm_layer")
+
+        self.inter_encoder_layer = Dense(intermediate_size,
+                activation=hidden_act,
+                kernel_initializer=create_initializer(initializer_range),
+                name="intermediate_encoder_layer")
+        self.inter_decoder_layer = Dense(hidden_size,
+                kernel_initializer=create_initializer(initializer_range),
+                name="intermediate_decoder_layer")
+        self.inter_dropout_layer = Dropout(hidden_dropout_prob,
+                name="intermediate_dropout_layer")
+        self.inter_layerNorm_layer = LayerNormalization(name="intermediate_layerNorm_layer")
+
+    def call(self, inputs, input_mask, training=None):
+        attn_output = self.attn_layer(inputs, input_mask)
+        attn_output = self.attn_dense_layer(attn_output)
+        attn_output = self.attn_dropout_layer(attn_output, training=training)
+        attn_output = self.attn_layerNorm_layer(attn_output + inputs)
+
+        inter_output = self.inter_encoder_layer(attn_output)
+        outputs = self.inter_decoder_layer(inter_output)
+        outputs = self.inter_dropout_layer(outputs, training=training)
+        outputs = self.inter_layerNorm_layer(outputs + attn_output)
+
+        return outputs
+
 
 class BertModel(tf.keras.Model):
     def __init__(self,
@@ -245,7 +301,7 @@ class BertModel(tf.keras.Model):
                  name="bert_model",
                  **kwargs):
         # super().__init__(name="bert model", **kwargs)
-        super(BertModel, self).__init__(name=name, **kwargs)
+        super(BertModel, self).__init__(**kwargs)
 
         self.config = config
 
@@ -257,9 +313,24 @@ class BertModel(tf.keras.Model):
                 dropout_prob=config.hidden_dropout_prob,
                 stddev=config.initializer_range)
         
+        self.encoder_layers = [
+            Encoder(hidden_size=config.hidden_size,
+                    num_attention_heads=config.num_attention_heads,
+                    attention_probs_dropout_prob=config.attention_probs_dropout_prob,
+                    hidden_dropout_prob=config.hidden_dropout_prob,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    initializer_range=config.initializer_range)
+                    for _ in range(config.num_hidden_layers)
+        ]
+
+        self.pooled_dense_layer = Dense(config.hidden_size,
+                activation="tanh",
+                kernel_initializer=create_initializer(config.initializer_range),
+                name="nsp_layer_Dense")
+
     def call(self, inputs, training=None):
         (input_ids, input_mask, token_type_ids) = inputs
-        print(input_ids.shape)
         batch_size = input_ids.shape[0]
         seq_length = input_ids.shape[1]
 
@@ -283,30 +354,8 @@ class BertModel(tf.keras.Model):
         prev_output = self.embedding_output
             
         for layer_idx in range(self.config.num_hidden_layers):
-            attention_layer = AttentionLayer(self.config.hidden_size,
-                    num_attention_heads=self.config.num_attention_heads,
-                    attention_probs_dropout_prob=self.config.attention_probs_dropout_prob,
-                    initializer_range=self.config.initializer_range,
-                    name="attn_layer_(%d)" % layer_idx)
-            attn_output = attention_layer(prev_output, input_mask, training=training)
-            attn_output = tf.keras.layers.Dense(self.config.hidden_size,
-                    kernel_initializer=create_initializer(self.config.initializer_range),
-                    name="attn_layer_(%d)_Dense" % layer_idx)(attn_output)
-            attn_output = tf.keras.layers.Dropout(self.config.attention_probs_dropout_prob,
-                    name="attn_layer_(%d)_Dropout" % layer_idx)(attn_output, training=training)
-            attn_output = tf.keras.layers.LayerNormalization(name="attn_layer_(%d)_LayerNormalization" % layer_idx)(attn_output + prev_output)
-
-            inter_output = tf.keras.layers.Dense(self.config.intermediate_size,
-                    activation=self.config.hidden_act,
-                    kernel_initializer=create_initializer(self.config.initializer_range),
-                    name="fnn_layer_(%d)_encoder" % layer_idx)(attn_output)
-            curr_output = tf.keras.layers.Dense(self.config.hidden_size,
-                    kernel_initializer=create_initializer(self.config.initializer_range),
-                    name="fnn_layer_(%d)_decoder" % layer_idx)(inter_output)
-            curr_output = tf.keras.layers.Dropout(self.config.hidden_dropout_prob,
-                    name="fnn_layer_(%d)_Dropout" % layer_idx)(curr_output, training=training)
-            curr_output = tf.keras.layers.LayerNormalization(name="fnn_layer_(%d)_LayerNormalization" % layer_idx)(curr_output + attn_output)
-
+            encoder_layer = self.encoder_layers[layer_idx]
+            curr_output = encoder_layer(inputs=prev_output, input_mask=input_mask, training=training)
             prev_output = curr_output
             self.all_encoder_outputs.append(curr_output)
 
@@ -316,10 +365,7 @@ class BertModel(tf.keras.Model):
         # first_token_output = [batch_size, hidden_size]
         first_token_output = self.sequence_output[:, 0]
         # self.pooled_output = [batch_size, hidden_size]
-        self.pooled_output = tf.keras.layers.Dense(self.config.hidden_size,
-                activation="tanh",
-                kernel_initializer=create_initializer(self.config.initializer_range),
-                name="nsp_layer_Dense")(first_token_output)
+        self.pooled_output = self.pooled_dense_layer(first_token_output)
         
         return self.sequence_output
 
@@ -330,7 +376,7 @@ class BertModel(tf.keras.Model):
         return self.sequence_output
     
     def get_all_encoder_outputs(self):
-        return self.get_all_encoder_outputs
+        return self.all_encoder_outputs
     
     def get_embedding_output(self):
         return self.embedding_output
@@ -339,7 +385,7 @@ class BertModel(tf.keras.Model):
         return self.embedding_table
 
 
-config = BertConfig(vocab_size=10,
+config = BertConfig(vocab_size=30000,
                     hidden_size=768,
                     num_hidden_layers=12,
                     num_attention_heads=12,
@@ -351,67 +397,30 @@ config = BertConfig(vocab_size=10,
                     type_vocab_size=2,
                     initializer_range=0.02)
 
+
 my_model = BertModel(config)
 
 input_ids = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
 input_mask = tf.random.uniform(shape=[3, 512], maxval=1, dtype=tf.int32)
-token_type_ids = None
-
-outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+token_type_ids = tf.zeros(shape=[3, 512], dtype=tf.int32)
 
 inputs = (input_ids, input_mask, token_type_ids)
+outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
 
 
+# test_inputs_1 = tf.keras.Input(shape=(512,))
+# print("test_inputs_1 shape")
+# print(test_inputs_1.shape)
+# test_inputs_2 = tf.keras.Input(shape=(512,))
+# test_inputs_3 = tf.zeros(shape=[3, 512], dtype=tf.int32)
 
-test_inputs_1 = tf.keras.Input(shape=(512,))
-print("test_inputs_1 shape")
-print(test_inputs_1.shape)
-test_inputs_2 = tf.keras.Input(shape=(512,))
-test_inputs_3 = tf.zeros(shape=[3, 512], dtype=tf.int32)
-
-test_inputs = (input_ids, input_mask, test_inputs_3)
+test_inputs = (input_ids, input_mask, token_type_ids)
 test_outputs = my_model(test_inputs)
 
 
-
-# model.compile(optimizer="adam",
-                #  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-                #  metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")])
+my_model.compile(optimizer="adam",
+                 loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                 metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")])
 
 # model.fit(x=test_inputs, y=outputs, epochs=1)
-my_model.summary()
-
-
-
-
-
-
-
-
-
-
-# class SimpleDense(Layer):
-    
-#     def __init__(self, units=32):
-#         super(SimpleDense, self).__init__()
-#         self.units = units
-    
-#     def build(self, input_shape):
-#         w_init = tf.random_normal_initializer()
-#         self.w = tf.Variable(
-#             initial_value=w_init(shape=(input_shape[-1], self.units), dtype="float32"),
-#             trainable=True)
-#         b_init = tf.zeros_initializer()
-#         self.b = tf.Variable(
-#             initial_value=b_init(shape=(self.units,), dtype="float32"),
-#             trainable=True)
-    
-#     def call(self, inputs):
-#         return tf.matmul(inputs, self.w) + self.b
-
-# linear_layer = SimpleDense(4)
-
-# y = linear_layer(tf.ones((2,2)))
-# assert len(linear_layer.weights) == 2
-
-# assert len(linear_layer.trainable_weights) == 2
+my_model.summary(line_length=100)
