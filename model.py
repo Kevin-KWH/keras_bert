@@ -5,6 +5,10 @@ import copy
 
 import tensorflow as tf
 from tensorflow.keras.layers import Layer, Embedding, Dense, Dropout, Softmax, LayerNormalization
+from tensorflow.keras.losses import Loss
+
+
+MAX_PREDICTIONS_PER_SEQ = 2
 
 
 def create_initializer(stddev=0.02):
@@ -26,6 +30,24 @@ def check_token_type_ids(token_type_ids, type_vocab_size):
     unique_values = list(unique_values.numpy())
     return False if len(unique_values) > type_vocab_size else True
 
+def gather_indexes(sequence_tensor, positions):
+    # sequence_tensor = [batch_size, seq_length, hidden_size]
+    # positions = [batch_size, max_predictions_per_seq]
+    assert sequence_tensor.ndim == 3, "the rank of sequence_tensor must be 3, but is (%d)" % sequence_tensor.ndim
+    batch_size = tf.shape(sequence_tensor)[0]
+    seq_length = tf.shape(sequence_tensor)[1]
+    hidden_size = tf.shape(sequence_tensor)[2]
+
+    # flat_offsets = [batch_size, 1]
+    flat_offsets = tf.reshape(tf.range(0, batch_size, dtype=tf.int32) * seq_length, [-1, 1])
+    # flat_positions = [batch_size * max_predictions_per_seq]
+    flat_positions = tf.reshape(positions + flat_offsets, [-1])
+
+    # flat_sequence_tensor = [batch_size * seq_length, hidden_size]
+    flat_sequence_tensor = tf.reshape(sequence_tensor, [batch_size * seq_length, hidden_size])
+    # output_tensor = [batch_size * max_predications_per_seq, hidden_size]
+    output_tensor = tf.gather(flat_sequence_tensor, flat_positions)
+    return output_tensor
 
 class BertConfig(object):
     def __init__(self,
@@ -169,12 +191,12 @@ class AttentionLayer(Layer):
         
         self.attn_softmax_layer = Softmax()
         self.attn_dropout_layer = Dropout(self.attention_probs_dropout_prob)
-
+    
     def process_attention_mask(self, attention_mask):
         # attention_mask = [batch_size, seq_length]
-        assert attention_mask.ndim == 2, "rank of attention mask must equal to 2, [batch_size, seq_length]"
-        batch_size = attention_mask.shape[0]
-        seq_length = attention_mask.shape[1]
+        assert len(tf.shape(attention_mask)) == 2, "rank of attention mask must equal to 2, [batch_size, seq_length]"
+        batch_size = tf.shape(attention_mask)[0]
+        seq_length = tf.shape(attention_mask)[1]
 
         # attention_mask = [batch_size, 1, seq_length]
         attention_mask = tf.cast(tf.reshape(attention_mask, [batch_size, 1, seq_length]), tf.float32)
@@ -199,9 +221,9 @@ class AttentionLayer(Layer):
     def call(self, inputs, attention_mask=None, training=None):
         # inputs is the output of embedding layer or the output of previous encoder block
         # inputs = [batch_size, seq_length, hidden_size]
-        assert inputs.ndim == 3, "rank of input_ids must equal to 3, [batch_size, seq_length, hidden_size]"
-        batch_size = inputs.shape[0]
-        seq_length = inputs.shape[1]
+        assert len(tf.shape(inputs)) == 3, "rank of input_ids must equal to 3, [batch_size, seq_length, hidden_size]"
+        batch_size = tf.shape(inputs)[0]
+        seq_length = tf.shape(inputs)[1]
 
         # query = [batch_size, seq_length, hidden_size]
         query = self.query_layer(inputs)
@@ -343,9 +365,9 @@ class BertModel(tf.keras.Model):
         if token_type_ids is None:
             token_type_ids = tf.zeros(shape=[batch_size, seq_length], dtype=tf.int32)
         
-        assert check_input_mask(input_mask), "values of input_mask must be 0 or 1"
-        assert check_token_type_ids(token_type_ids, self.config.type_vocab_size), "num of token types in token_type_ids\
-                must not be larger than type_vocab_size in config (%d)" % (self.config.type_vocab_size)
+        # assert check_input_mask(input_mask), "values of input_mask must be 0 or 1"
+        # assert check_token_type_ids(token_type_ids, self.config.type_vocab_size), "num of token types in token_type_ids\
+                # must not be larger than type_vocab_size in config (%d)" % (self.config.type_vocab_size)
 
         self.embedding_output, self.embedding_table = self.embedding_layer(input_ids, token_type_ids, training=training)
 
@@ -385,11 +407,11 @@ class BertModel(tf.keras.Model):
         return self.embedding_table
 
 
-config = BertConfig(vocab_size=30000,
-                    hidden_size=768,
-                    num_hidden_layers=12,
-                    num_attention_heads=12,
-                    intermediate_size=3072,
+config = BertConfig(vocab_size=300,
+                    hidden_size=128,
+                    num_hidden_layers=4,
+                    num_attention_heads=2,
+                    intermediate_size=512,
                     hidden_act="gelu",
                     hidden_dropout_prob=0.1,
                     attention_probs_dropout_prob=0.1,
@@ -400,27 +422,55 @@ config = BertConfig(vocab_size=30000,
 
 my_model = BertModel(config)
 
-input_ids = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
-input_mask = tf.random.uniform(shape=[3, 512], maxval=1, dtype=tf.int32)
-token_type_ids = tf.zeros(shape=[3, 512], dtype=tf.int32)
+
+class BertLoss(Loss):
+    def __init__():
+        pass
+
+    def get_masked_lm_loss(self, bert_config, sequence_output, embedding_table,
+                           positions, label_ids, label_weights):
+        # in:  sequence_output = [batch_size, max_seq_length, hidden_size]
+        # out: sequence_output = [batch_size * max_predications_per_seq, hidden_size]
+        sequence_output = gather_indexes(sequence_output, positions)
+
+
+input_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
+input_mask = tf.keras.Input(shape=(512,), dtype=tf.int32)
+token_type_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
 
 inputs = (input_ids, input_mask, token_type_ids)
-outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+outputs = my_model(inputs)
 
 
-# test_inputs_1 = tf.keras.Input(shape=(512,))
-# print("test_inputs_1 shape")
-# print(test_inputs_1.shape)
-# test_inputs_2 = tf.keras.Input(shape=(512,))
-# test_inputs_3 = tf.zeros(shape=[3, 512], dtype=tf.int32)
+# Masked token prediction task
+# sequence_output = [batch_size, seq_length, hidden_size]
+sequence_output = my_model.get_sequence_output()
+# embedding_table = [vocab_size, hidden_size]
+embedding_table = my_model.get_embedding_table()
 
-test_inputs = (input_ids, input_mask, token_type_ids)
-test_outputs = my_model(test_inputs)
+# positions, label_ids, label_weights = [batch_size, MAX_PREDICTIONS_PER_SEQ]
+positions = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
+label_ids = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
+label_weights = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
+
+mask_tokens_output = gather_indexes(sequence_output, positions)
+
 
 
 my_model.compile(optimizer="adam",
                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                  metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")])
 
-# model.fit(x=test_inputs, y=outputs, epochs=1)
 my_model.summary(line_length=100)
+
+
+# training part
+
+train_input_ids = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+train_input_mask = tf.random.uniform(shape=[3, 512], maxval=1, dtype=tf.int32)
+train_token_type_ids = tf.zeros(shape=[3, 512], dtype=tf.int32)
+
+train_inputs = (train_input_ids, train_input_mask, train_token_type_ids)
+train_outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+
+my_model.fit(x=train_inputs, y=train_outputs, epochs=5)
