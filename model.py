@@ -376,10 +376,10 @@ class BertModel(tf.keras.Model):
             initializer=tf.keras.initializers.Zeros()
         )
 
-    def call(self, inputs, mlm_inputs=None, training=None):
-        (input_ids, input_mask, token_type_ids) = inputs
-        if self.with_mlm:
-            (masked_lm_positions, masked_lm_weights) = mlm_inputs
+    def call(self, inputs, training=None):
+        # if with_mlm=True, inputs will be (input_ids, input_mask, token_type_ids, masked_lm_positions, masked_lm_weights)
+        # else, inputs will be (input_ids, input_mask, token_type_ids)
+        (input_ids, input_mask, token_type_ids) = inputs[:3]
 
         batch_size = input_ids.shape[0]
         seq_length = input_ids.shape[1]
@@ -425,17 +425,17 @@ class BertModel(tf.keras.Model):
         
         # mlm task
         if self.with_mlm:
-            # mlm_outputs = [batch_size * max_predications_per_seq, hidden_size]
-            mlm_outputs = gather_indexes(self.sequence_output, masked_lm_positions)
+            # mlm_outputs = [batch_size, seq_length, hidden_size]
             mlm_outputs = self.mlm_dense_layer(self.sequence_output)
             mlm_outputs = self.mlm_layerNorm_layer(mlm_outputs)
             
-            # mlm_outputs = [batch_size * max_predications_per_seq, vocab_size]
+            # mlm_outputs = [batch_size, seq_length, vocab_size]
             mlm_outputs = tf.matmul(mlm_outputs, self.embedding_table, transpose_b=True)
             mlm_outputs += self.mlm_bias
-            mlm_outputs = self.mlm_softmax_layer(mlm_outputs)
+            self.mlm_outputs = self.mlm_softmax_layer(mlm_outputs)
         
-        return self.sequence_output
+        # return self.sequence_output
+        return (self.nsp_outputs, self.mlm_outputs)
 
     def get_pooled_output(self):
         return self.pooled_output
@@ -472,59 +472,62 @@ config = BertConfig(vocab_size=300,
                     initializer_range=0.02)
 
 
-my_model = BertModel(config)
+my_model = BertModel(config, with_nsp=True, with_mlm=True)
 
 
-class BertLoss(Loss):
-    def __init__():
-        pass
-
-    def get_masked_lm_loss(self, bert_config, sequence_output, embedding_table,
-                           positions, label_ids, label_weights):
-        # in:  sequence_output = [batch_size, max_seq_length, hidden_size]
-        # out: sequence_output = [batch_size * max_predications_per_seq, hidden_size]
-        sequence_output = gather_indexes(sequence_output, positions)
-
-
+# if with_mlm=True, inputs will be (input_ids, input_mask, token_type_ids, masked_lm_positions, masked_lm_weights)
 input_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
 input_mask = tf.keras.Input(shape=(512,), dtype=tf.int32)
 token_type_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
+# masked_lm_positions, masked_lm_weights = [batch_size, MAX_PREDICTIONS_PER_SEQ]
+masked_lm_positions = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
+masked_lm_weights = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
 
-inputs = (input_ids, input_mask, token_type_ids)
+inputs = (input_ids, input_mask, token_type_ids, masked_lm_positions, masked_lm_weights)
 outputs = my_model(inputs)
 
-# sequence_output = [batch_size, seq_length, hidden_size]
-sequence_output = my_model.get_sequence_output()
-# embedding_table = [vocab_size, hidden_size]
-embedding_table = my_model.get_embedding_table()
 # nsp_outputs = [batch_size, 2]
-nsp_outputs = my_model.get_nsp_outputs()
+# nsp_outputs = my_model.get_nsp_outputs()
 # mlm_outputs = [batch_size, seq_length, vocab_size]
-mlm_outputs = my_model.get_mlm_outputs()
+# mlm_outputs = my_model.get_mlm_outputs()
 
-# positions, label_ids, label_weights = [batch_size, MAX_PREDICTIONS_PER_SEQ]
-positions = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
-label_ids = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
-label_weights = tf.keras.Input(shape=(MAX_PREDICTIONS_PER_SEQ,), dtype=tf.int32)
+# outputs = (nsp_outputs, mlm_outputs)
+# label_ids = [batch_size, MAX_PREDICTIONS_PER_SEQ]
+# next_sentence_labels = [batch_size]
 
-# mask_tokens_output = gather_indexes(sequence_output, positions)
+# def loss(y_true, y_pred):
+    
 
 
+# my_model.compile(optimizer="adam",
+#                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+#                  metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")])
 
-my_model.compile(optimizer="adam",
+# my_model.summary(line_length=100)
+
+bert_model = tf.keras.Model(inputs=inputs, outputs=outputs)
+
+bert_model.compile(optimizer="adam",
                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                  metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="acc")])
 
-my_model.summary(line_length=100)
+bert_model.summary(line_length=100)
 
-
-# training part
-
+## training part
+# inputs
 train_input_ids = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
 train_input_mask = tf.random.uniform(shape=[3, 512], maxval=1, dtype=tf.int32)
 train_token_type_ids = tf.zeros(shape=[3, 512], dtype=tf.int32)
+train_masked_lm_positions = tf.random.uniform(shape=[3, 2], maxval=511, dtype=tf.int32)
+train_masked_lm_weights = tf.random.uniform(shape=[3, 2], maxval=1, dtype=tf.int32)
 
-train_inputs = (train_input_ids, train_input_mask, train_token_type_ids)
-train_outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+train_inputs = (train_input_ids, train_input_mask, train_token_type_ids, train_masked_lm_positions, train_masked_lm_weights)
 
-my_model.fit(x=train_inputs, y=train_outputs, epochs=5)
+# train_outputs = tf.random.uniform(shape=[3, 512], maxval=9, dtype=tf.int32)
+# outputs
+train_next_sentence_labels = tf.random.uniform(shape=[3, 2], maxval=1, dtype=tf.int32)
+train_mlm_label_ids = tf.random.uniform(shape=[3, 512, 300], maxval=299, dtype=tf.int32)
+
+train_outputs = (train_next_sentence_labels, train_mlm_label_ids)
+
+bert_model.fit(x=train_inputs, y=train_outputs, epochs=5)
