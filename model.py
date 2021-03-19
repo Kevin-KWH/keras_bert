@@ -5,6 +5,7 @@ import copy
 
 import tensorflow as tf
 from tensorflow.keras.layers import Layer, Embedding, Dense, Dropout, Softmax, LayerNormalization
+from tensorflow.keras import Model
 
 MAX_PREDICTIONS_PER_SEQ = 2
 
@@ -27,25 +28,6 @@ def check_token_type_ids(token_type_ids, type_vocab_size):
     unique_values, _ = tf.unique(tf.reshape(token_type_ids, [-1]))
     unique_values = list(unique_values.numpy())
     return False if len(unique_values) > type_vocab_size else True
-
-def gather_indexes(sequence_tensor, positions):
-    # sequence_tensor = [batch_size, seq_length, hidden_size]
-    # positions = [batch_size, max_predictions_per_seq]
-    # assert len(tf.shape(sequence_tensor)) == 3, "the rank of sequence_tensor must be 3, but is (%d)" % len(tf.shape(sequence_tensor))
-    batch_size = tf.shape(sequence_tensor)[0]
-    seq_length = tf.shape(sequence_tensor)[1]
-    # hidden_size = tf.shape(sequence_tensor)[2]
-
-    # flat_offsets = [batch_size, 1]
-    flat_offsets = tf.reshape(tf.range(0, batch_size, dtype=tf.int32) * seq_length, [-1, 1])
-    # flat_positions = [batch_size * max_predictions_per_seq]
-    flat_positions = tf.reshape(positions + flat_offsets, [-1])
-
-    # flat_sequence_tensor = [batch_size * seq_length, hidden_size]
-    flat_sequence_tensor = tf.reshape(sequence_tensor, [batch_size * seq_length, -1])
-    # output_tensor = [batch_size * max_predications_per_seq, hidden_size]
-    output_tensor = tf.gather(flat_sequence_tensor, flat_positions)
-    return output_tensor
 
 class BertConfig(object):
     def __init__(self,
@@ -91,6 +73,20 @@ class BertConfig(object):
 
     def to_json_string(self):
         return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+    
+    def get_config(self):
+        config = {"vocab_size": self.vocab_size,
+                  "hidden_size": self.hidden_size,
+                  "num_hidden_layers": self.num_hidden_layers,
+                  "num_attention_heads": self.num_attention_heads,
+                  "intermediate_size": self.intermediate_size,
+                  "hidden_act": self.hidden_act,
+                  "hidden_dropout_prob": self.hidden_dropout_prob,
+                  "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
+                  "max_position_embeddings": self.max_position_embeddings,
+                  "type_vocab_size": self.type_vocab_size,
+                  "initializer_range": self.initializer_range}
+        return config
 
 
 class EmbeddingLayer(Layer):
@@ -287,7 +283,7 @@ class AttentionLayer(Layer):
         config.update({"hidden_size": self.hidden_size,
                        "num_attention_heads": self.num_attention_heads,
                        "attention_probs_dropout_prob": self.attention_probs_dropout_prob,
-                       "initializer_range": initializer_range,
+                       "initializer_range": self.initializer_range,
                        "query_act": self.query_act,
                        "key_act": self.key_act,
                        "value_act": self.value_act,
@@ -367,7 +363,7 @@ class Encoder(Layer):
         return config
 
 
-class BertModel(Layer):
+class BertModel(Model):
     def __init__(self,
                  config:BertConfig,
                  with_nsp=False,
@@ -375,7 +371,6 @@ class BertModel(Layer):
                  is_pretrain=False,
                  name="bert_model",
                  **kwargs):
-        # super().__init__(name="bert model", **kwargs)
         super(BertModel, self).__init__(**kwargs)
 
         self.config = config
@@ -429,7 +424,7 @@ class BertModel(Layer):
         )
 
     def call(self, inputs, training=None):
-        # if with_mlm=True, inputs will be (input_ids, input_mask, token_type_ids, masked_lm_positions, masked_lm_weights)
+        # if with_mlm=True, inputs will be (input_ids, input_mask, token_type_ids, masked_lm_positions)
         # else, inputs will be (input_ids, input_mask, token_type_ids)
         (input_ids, input_mask, token_type_ids) = inputs[:3]
         if self.with_mlm:
@@ -522,38 +517,14 @@ class BertModel(Layer):
         config.update({"config": self.config,
                        "with_nsp": self.with_nsp,
                        "with_mlm": self.with_mlm,
-                       "is_pretrain": self.is_pretrain})
+                       "is_pretrain": self.is_pretrain,
+                       "get_pooled_output": self.get_pooled_output(),
+                       "get_sequence_output": self.get_sequence_output(),
+                       "get_all_encoder_outputs": self.get_all_encoder_outputs(),
+                       "get_embedding_output": self.get_embedding_output(),
+                       "get_embedding_table": self.get_embedding_table()
+                       })
         return config
-
-
-config = BertConfig(vocab_size=300,
-                    hidden_size=128,
-                    num_hidden_layers=4,
-                    num_attention_heads=2,
-                    intermediate_size=512,
-                    hidden_act="gelu",
-                    hidden_dropout_prob=0.1,
-                    attention_probs_dropout_prob=0.1,
-                    max_position_embeddings=512,
-                    type_vocab_size=2,
-                    initializer_range=0.02)
-
-
-model = BertModel(config, with_nsp=True, with_mlm=True, is_pretrain=True)
-
-
-# if with_mlm=True, inputs will be (input_ids, input_mask, token_type_ids, masked_lm_positions, masked_lm_weights)
-input_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
-input_mask = tf.keras.Input(shape=(512,), dtype=tf.int32)
-token_type_ids = tf.keras.Input(shape=(512,), dtype=tf.int32)
-# masked_lm_positions, masked_lm_weights = [batch_size, MAX_PREDICTIONS_PER_SEQ]
-masked_lm_positions = tf.keras.Input(shape=(2,), dtype=tf.int32)
-# masked_lm_weights = tf.keras.Input(shape=(2,), dtype=tf.float32)
-
-inputs = (input_ids, input_mask, token_type_ids, masked_lm_positions)
-outputs = model(inputs)
-
-bert_model = tf.keras.Model(inputs, outputs)
 
 
 # def mlm_loss_wrapper(inputs):
@@ -573,7 +544,7 @@ bert_model = tf.keras.Model(inputs, outputs)
 #         return mlm_loss
 #     return mlm_loss
 
-
+# custom loss part
 def mlm_loss(y_true, y_pred):
     mlm_weights = tf.cast(tf.not_equal(y_true, 0), dtype=tf.float32)
     scc = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE)
@@ -583,6 +554,7 @@ def mlm_loss(y_true, y_pred):
     mlm_loss = numerator / denominator
     return mlm_loss
 
+# custom metrics part
 def nsp_accuracy(y_true, y_pred):
     y_true = tf.cast(y_true, dtype=tf.float32)
     y_true = tf.reshape(y_true, [-1])
@@ -606,61 +578,3 @@ def mlm_accuracy(y_true, y_pred):
     denominator = tf.reduce_sum(mlm_weights) + 1e-5
     metric = numerator / denominator
     return metric
-
-
-custom_objects = {
-    'EmbeddingLayer': EmbeddingLayer,
-    'AttentionLayer': AttentionLayer,
-    'Encoder': Encoder,
-    'BertModel': BertModel,
-    "mlm_loss": mlm_loss,
-    "nsp_accuracy": nsp_accuracy,
-    "mlm_accuracy": mlm_accuracy
-}
-
-tf.keras.utils.get_custom_objects().update(custom_objects)
-
-bert_model.compile(optimizer="adam",
-                   loss={"bert_model": tf.keras.losses.SparseCategoricalCrossentropy(),
-                         "bert_model_1": mlm_loss},
-                   loss_weights={"bert_model": 1, "bert_model_1": 1},
-                   metrics={"bert_model": nsp_accuracy, "bert_model_1": mlm_accuracy}
-                )
-
-bert_model.summary(line_length=130)
-
-## training part
-# inputs
-train_input_ids = tf.random.uniform(shape=[30, 512], maxval=10, dtype=tf.int32)
-train_input_mask = tf.random.uniform(shape=[30, 512], maxval=2, dtype=tf.int32)
-train_token_type_ids = tf.zeros(shape=[30, 512], dtype=tf.int32)
-train_masked_lm_positions = tf.random.uniform(shape=[30, 2], maxval=512, dtype=tf.int32)
-
-train_inputs = (train_input_ids, train_input_mask, train_token_type_ids, train_masked_lm_positions)
-
-# outputs
-train_next_sentence_labels = tf.random.uniform(shape=[30], maxval=2, dtype=tf.int32)
-train_mlm_label_ids = tf.random.uniform(shape=[30, 2], maxval=300, dtype=tf.int32)
-
-train_outputs = (train_next_sentence_labels, train_mlm_label_ids)
-
-bert_model.fit(x=train_inputs, y=train_outputs, epochs=1)
-print(bert_model.metrics_names)
-
-bert_model.save("saved_model/bert")
-
-# load
-# new_model = BertModel(config, with_nsp=True, with_mlm=True, is_pretrain=False)
-# outputs = new_model(inputs)
-# print("new model outputs:")
-# print(outputs)
-
-# new_bert_model = tf.keras.Model(inputs, outputs)
-# new_bert_model.compile(optimizer="adam",
-#                    loss={"bert_model": tf.keras.losses.SparseCategoricalCrossentropy(),
-#                          "bert_model_1": mlm_loss},
-#                    loss_weights={"bert_model": 1, "bert_model_1": 1},
-#                    metrics={"bert_model": nsp_accuracy, "bert_model_1": mlm_accuracy}
-#                 )
-
-# new_bert_model.summary(line_length=130)
