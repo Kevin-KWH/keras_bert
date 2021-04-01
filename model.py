@@ -433,9 +433,6 @@ class BertModel(Model):
         batch_size = input_ids.shape[0]
         seq_length = input_ids.shape[1]
 
-        assert self.config.max_position_embeddings == seq_length, "seq length of input_ids (%d) must euqal to \
-                max_position_embeddings in config (%d)" % (seq_length, self.config.max_position_embeddings)
-
         if input_mask is None:
             input_mask = tf.ones(shape=[batch_size, seq_length], dtype=tf.int32)
         

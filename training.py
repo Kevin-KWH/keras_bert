@@ -42,10 +42,10 @@ bert_model.compile(optimizer="adam",
 bert_model.summary(line_length=130)
 
 # inputs
-train_input_ids = tf.random.uniform(shape=[30, 512], maxval=10, dtype=tf.int32)
-train_input_mask = tf.random.uniform(shape=[30, 512], maxval=2, dtype=tf.int32)
-train_token_type_ids = tf.zeros(shape=[30, 512], dtype=tf.int32)
-train_masked_lm_positions = tf.random.uniform(shape=[30, 2], maxval=512, dtype=tf.int32)
+train_input_ids = tf.random.uniform(shape=[30, 111], maxval=10, dtype=tf.int32)
+train_input_mask = tf.random.uniform(shape=[30, 111], maxval=2, dtype=tf.int32)
+train_token_type_ids = tf.zeros(shape=[30, 111], dtype=tf.int32)
+train_masked_lm_positions = tf.random.uniform(shape=[30, 2], maxval=111, dtype=tf.int32)
 
 train_inputs = (train_input_ids, train_input_mask, train_token_type_ids, train_masked_lm_positions)
 
